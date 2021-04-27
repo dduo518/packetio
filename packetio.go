@@ -11,14 +11,19 @@ import (
 	"net"
 )
 
+type PacketIo interface {
+	Read(ctx context.Context) (*Message, error)
+	Write(message *Message) error
+}
+
 const (
-	HeaderLen   = 41
+	headerLen   = 4
 	Version     = "1.0.0"
 	MessageSign = "!@QESEFDSAID#$134"
 )
 
-func NewPacketIo(conn net.Conn) *PacketIo {
-	p := &PacketIo{
+func NewPacketIo(conn net.Conn) PacketIo {
+	p := &Packetio{
 		scan: bufio.NewScanner(conn),
 		w:    bufio.NewWriter(conn),
 	}
@@ -26,12 +31,12 @@ func NewPacketIo(conn net.Conn) *PacketIo {
 	return p
 }
 
-type PacketIo struct {
+type Packetio struct {
 	scan *bufio.Scanner
 	w    *bufio.Writer
 }
 
-func (p *PacketIo) Read(ctx context.Context) (*Message, error) {
+func (p *Packetio) Read(ctx context.Context) (*Message, error) {
 	for p.scan.Scan() {
 		select {
 		case <-ctx.Done():
@@ -53,11 +58,11 @@ func (p *PacketIo) Read(ctx context.Context) (*Message, error) {
 	return nil, fmt.Errorf("read err")
 }
 
-func (p *PacketIo) Write(m *Message) error {
+func (p *Packetio) Write(m *Message) error {
 	if bs, err := json.Marshal(m); err != nil {
 		return err
 	} else {
-		var lenNum = make([]byte, HeaderLen)
+		var lenNum = make([]byte, headerLen)
 		binary.BigEndian.PutUint32(lenNum, uint32(len(bs)))
 		var buf = bytes.NewBuffer(lenNum)
 		_, _ = buf.Write(bs)
@@ -68,7 +73,7 @@ func (p *PacketIo) Write(m *Message) error {
 	}
 }
 
-func (p *PacketIo) split(data []byte, atEOF bool) (advance int, token []byte, err error) {
+func (p *Packetio) split(data []byte, atEOF bool) (advance int, token []byte, err error) {
 	if len(data) < 4 {
 		return
 	}
