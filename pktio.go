@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"github.com/opentracing/opentracing-go"
+	"github.com/uber/jaeger-client-go"
 	"io"
 	"net"
 	"time"
@@ -13,50 +15,46 @@ import (
 
 const defaultReaderSize = 16 * 1024
 const defaultWriterSize = 16 * 1024
-const defaultReaderTimeout = time.Second * 30
-const headerLength = 41
+const defaultReaderTimeout = 60
+const defaultHeaderLen = 33
 
-type PktIO struct {
+type PackIO struct {
 	net.Conn
-	reader      *bufio.Reader
-	writer      *bufio.Writer
-	readTimeout time.Duration
+	reader *bufio.Reader
+	writer *bufio.Writer
+	opts   *Options
 }
 
-func NewPktIO(conn net.Conn) PacketIo {
-	return &PktIO{
-		Conn:        conn,
-		reader:      bufio.NewReader(conn),
-		writer:      bufio.NewWriterSize(conn, defaultWriterSize),
-		readTimeout: defaultReaderTimeout,
+func NewPackIO(conn net.Conn, options ...Option) PacketIO {
+	pkt := &PackIO{
+		Conn:   conn,
+		reader: bufio.NewReaderSize(conn, defaultReaderSize),
+		writer: bufio.NewWriterSize(conn, defaultWriterSize),
+		opts: &Options{
+			trace:       false,
+			readTimeout: defaultReaderTimeout,
+		},
 	}
+	for _, option := range options {
+		option(pkt.opts)
+	}
+	return pkt
 }
 
-func (p *PktIO) SetReadTimeout(timeout time.Duration) {
-	p.readTimeout = timeout
-}
-
-func (p *PktIO) SetBufferedReadConn(conn net.Conn) {
-	p.Conn = conn
-	p.reader = bufio.NewReaderSize(conn, defaultReaderSize)
-	p.writer = bufio.NewWriterSize(conn, defaultWriterSize)
-	conn.(*net.TCPConn).SetNoDelay(false) // 不使用Nagle算法 禁用Nagle算法后，数据将尽可能快的被发送出去。
-}
-
-func (p *PktIO) Read(ctx context.Context) (*Message, error) {
+func (p *PackIO) Read(ctx context.Context) (context.Context, *Message, error) {
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("read end")
+			return nil, nil, fmt.Errorf("read end")
 		default:
-			var header = make([]byte, headerLength)
-			if p.readTimeout > 0 {
-				_ = p.Conn.(*net.TCPConn).SetReadDeadline(time.Now().Add(p.readTimeout))
+			var header = make([]byte, defaultHeaderLen)
+			if p.opts.readTimeout > 0 {
+				_ = p.Conn.(*net.TCPConn).SetReadDeadline(time.Now().Add(p.opts.readTimeout * time.Second))
 			}
 			if _, err := io.ReadFull(p.reader, header[:]); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
-
+			
 			msgLen := int(binary.BigEndian.Uint32(header[:4]))
 			var m = &Message{
 				Cmd:          binary.BigEndian.Uint32(header[4:8]),
@@ -65,50 +63,74 @@ func (p *PktIO) Read(ctx context.Context) (*Message, error) {
 				Time:         int64(binary.BigEndian.Uint64(header[8:16])),
 				Content:      make([]byte, msgLen),
 			}
-
 			if _, err := io.ReadFull(p.reader, m.Content[:]); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
-
+			var spanCtx opentracing.SpanContext
+			var err error
+			if p.opts.trace {
+				tra := opentracing.GlobalTracer()
+				tracer, ok := tra.(*jaeger.Tracer)
+				if ok {
+					spanCtx, err = tracer.Extract(opentracing.Binary, p.reader)
+					if err != nil {
+						return nil, nil, err
+					}
+				}
+			}
+			
 			if !m.check() {
-				return nil, fmt.Errorf("uncheck sig message")
+				return nil, nil, fmt.Errorf("uncheck sig message")
 			}
-			return m, nil
+			
+			if spanCtx != nil {
+				sp := opentracing.StartSpan("receive_packet", opentracing.FollowsFrom(spanCtx))
+				sp.Finish()
+				return opentracing.ContextWithSpan(ctx, sp), m, nil
+			}
+			return context.TODO(), m, nil
 		}
 	}
 }
 
-func (p *PktIO) Write(message *Message) error {
+func (p *PackIO) Write(ctx context.Context, message *Message) error {
 	message.sign()
-	var total = len(message.Content) + headerLength
 	var header = make([]byte, 17)
 	binary.BigEndian.PutUint32(header[:4], uint32(len(message.Content)))
 	binary.BigEndian.PutUint32(header[4:8], message.Cmd)
 	binary.BigEndian.PutUint64(header[8:16], uint64(message.Time))
 	header[16] = uint8(message.EncodingType)
-
-	var lenNum = make([]byte, 0, total)
+	
+	var lenNum = make([]byte, 0, defaultHeaderLen)
 	var buf = bytes.NewBuffer(lenNum)
 	if _, err := buf.Write(header); err != nil {
 		return err
 	}
-
+	
 	if _, err := buf.Write(message.Sig); err != nil {
 		return err
 	}
-
-	if _, err := buf.Write(make([]byte, 8)); err != nil {
-		return err
-	}
-
 	if _, err := buf.Write(message.Content); err != nil {
 		return err
 	}
-
-	if count, err := p.writer.Write(buf.Bytes()); err != nil {
+	if _, err := p.writer.Write(buf.Bytes()); err != nil {
 		return err
-	} else if count != total {
-		return fmt.Errorf("write err")
+	}
+	
+	if p.opts.trace {
+		sp := opentracing.SpanFromContext(ctx)
+		tra := opentracing.GlobalTracer()
+		tracer, ok := tra.(*jaeger.Tracer)
+		if ok && sp != nil {
+			b := bytes.NewBuffer(make([]byte, 0))
+			err := tracer.Inject(sp.Context(), opentracing.Binary, b)
+			if err != nil {
+				return err
+			}
+			if _, err := p.writer.Write(b.Bytes()); err != nil {
+				return err
+			}
+		}
 	}
 	return p.writer.Flush()
 }

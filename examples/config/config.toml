@@ -1,0 +1,7 @@
+# service="tcp_client"
+[tcp]
+host = "127.0.0.1"
+port = "9001"
+
+[collector]
+addr="localhost:5775"

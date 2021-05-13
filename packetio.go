@@ -7,23 +7,19 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"github.com/opentracing/opentracing-go"
 	"io"
 	"net"
 )
 
-type PacketIo interface {
-	Read(ctx context.Context) (*Message, error)
-	Write(message *Message) error
-}
-
 const (
-	headerLen   = 4
+	HeaderLen   = 4
 	Version     = "1.0.0"
 	MessageSign = "!@QESEFDSAID#$134"
 )
 
-func NewPacketIo(conn net.Conn) PacketIo {
-	p := &Packetio{
+func NewPacketIo(conn net.Conn) PacketIO {
+	p := &PacketIo{
 		scan: bufio.NewScanner(conn),
 		w:    bufio.NewWriter(conn),
 	}
@@ -31,38 +27,55 @@ func NewPacketIo(conn net.Conn) PacketIo {
 	return p
 }
 
-type Packetio struct {
+type PacketIo struct {
 	scan *bufio.Scanner
 	w    *bufio.Writer
 }
 
-func (p *Packetio) Read(ctx context.Context) (*Message, error) {
+func (p *PacketIo) Read(ctx context.Context) (context.Context, *Message, error) {
 	for p.scan.Scan() {
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("read closed")
+			return nil, nil, fmt.Errorf("read closed")
 		default:
 			err := p.scan.Err()
 			if err != nil && err != io.EOF {
-				return nil, err
+				return nil, nil, err
 			}
-
+			
 			bs := p.scan.Bytes()
 			var msg = &Message{}
 			if err := json.Unmarshal(bs, msg); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
-			return msg, nil
+			
+			if msg.Metadata != nil {
+				spanCtx, err := Extract(msg.Metadata)
+				if err != nil {
+					return nil, nil, err
+				}
+				if spanCtx != nil {
+					sp := opentracing.StartSpan("receive_packet", opentracing.FollowsFrom(spanCtx))
+					sp.Finish()
+					return opentracing.ContextWithSpan(ctx, sp), msg, nil
+				}
+			}
+			return context.TODO(), msg, nil
 		}
 	}
-	return nil, fmt.Errorf("read err")
+	return nil, nil, fmt.Errorf("read err")
 }
 
-func (p *Packetio) Write(m *Message) error {
+func (p *PacketIo) Write(ctx context.Context, m *Message) error {
+	
+	if sp := opentracing.SpanFromContext(ctx); sp != nil {
+		m.Metadata = make(map[string]interface{})
+		_ = Inject(sp, m.Metadata)
+	}
 	if bs, err := json.Marshal(m); err != nil {
 		return err
 	} else {
-		var lenNum = make([]byte, headerLen)
+		var lenNum = make([]byte, HeaderLen)
 		binary.BigEndian.PutUint32(lenNum, uint32(len(bs)))
 		var buf = bytes.NewBuffer(lenNum)
 		_, _ = buf.Write(bs)
@@ -73,13 +86,13 @@ func (p *Packetio) Write(m *Message) error {
 	}
 }
 
-func (p *Packetio) split(data []byte, atEOF bool) (advance int, token []byte, err error) {
+func (p *PacketIo) split(data []byte, atEOF bool) (advance int, token []byte, err error) {
 	if len(data) < 4 {
 		return
 	}
-	length := binary.BigEndian.Uint32(data[:4])
-	if !atEOF && length == uint32(len(data[4:])) {
-		return len(data), data[4:], nil
+	length := binary.BigEndian.Uint32(data[:HeaderLen])
+	if !atEOF && length == uint32(len(data[HeaderLen:])) {
+		return len(data), data[HeaderLen:], nil
 	}
 	return
 }
