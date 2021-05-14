@@ -6,7 +6,7 @@ import (
 	"log"
 	"net"
 	_ "net/http/pprof"
-	"packetio"
+	"github.com/elvin-zheng/packetio"
 )
 
 type Service interface {

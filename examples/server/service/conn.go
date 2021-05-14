@@ -7,7 +7,7 @@ import (
 	"net"
 	"sync/atomic"
 	"time"
-	"packetio"
+	"github.com/elvin-zheng/packetio"
 )
 
 var connId uint64

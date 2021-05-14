@@ -1,5 +1,5 @@
 ### TCP解析包
-
+[有关TCP粘包的真相](https://github.com/elvin-zheng/hexo-blog/issues/37)
 ##### 使用方式
 ```GO
 // 配置链路追踪

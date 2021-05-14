@@ -7,7 +7,7 @@ import (
 	"go.uber.org/zap"
 	"net"
 	"time"
-	"packetio"
+	"github.com/elvin-zheng/packetio"
 )
 
 type client struct {

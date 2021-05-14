@@ -1,4 +1,4 @@
-module packetio
+module github.com/elvin-zheng/packetio
 
 go 1.16
 

@@ -4,7 +4,7 @@ import (
 	"context"
 	"github.com/opentracing/opentracing-go"
 	"go.uber.org/zap"
-	"packetio"
+	"github.com/elvin-zheng/packetio"
 )
 
 type Worker interface {
